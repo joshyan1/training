@@ -8,12 +8,12 @@ from torchvision import datasets, transforms
 import torch.nn as nn
 import torch.optim as optim
 
-SERVER_URL = "http://127.0.0.1:11435"  # Flask server IP and port
+SERVER_URL = "http://10.36.255.255:11435"  # Flask server IP and port
 
 def setup(rank, world_size, master_ip):
     os.environ['MASTER_ADDR'] = master_ip  # Use the master's IP
     os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
@@ -34,27 +34,45 @@ def train(rank, world_size, master_ip):
     setup(rank, world_size, master_ip)
     torch.manual_seed(0)
 
+    # Enable MPS for Apple Silicon
+    device = torch.device("mps")
+    print(f"Rank {rank} is using device: {device}")
+
+    # Data preparation
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
     dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     train_loader = torch.utils.data.DataLoader(dataset, batch_size=32, sampler=sampler)
 
-    model = SimpleModel().to(rank)
+    # Model and optimizer
+    model = SimpleModel().to(device)
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     criterion = nn.CrossEntropyLoss()
 
+    # Training loop
     model.train()
     for epoch in range(5):
+        epoch_loss = 0
         for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(rank), target.to(rank)
+            data, target = data.to(device), target.to(device)  # Move data to MPS device
             optimizer.zero_grad()
             output = model(data)
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
 
+            epoch_loss += loss.item()
+
             if rank == 0 and batch_idx % 10 == 0:
                 print(f"Epoch {epoch} Batch {batch_idx}, Loss: {loss.item()}")
+
+        # Aggregate loss across all ranks
+        total_loss = torch.tensor(epoch_loss).to(device)
+        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        avg_loss = total_loss.item() / world_size
+
+        if rank == 0:
+            print(f"Epoch {epoch}: Average Loss: {avg_loss}")
 
     cleanup()
 
@@ -69,6 +87,8 @@ if __name__ == '__main__':
     # Query the Flask server to get the master's IP
     response = requests.get(f"{SERVER_URL}/get_master_ip")
     master_ip = response.json().get("master_ip")
+    if not master_ip:
+        raise RuntimeError("Failed to retrieve master IP from Flask server.")
     print(f"Received master IP: {master_ip}")
 
     # Start training
