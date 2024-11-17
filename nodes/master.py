@@ -7,14 +7,17 @@ import torch.multiprocessing as mp
 from torchvision import datasets, transforms
 import torch.nn as nn
 import torch.optim as optim
-import json
+import logging
 
-SERVER_URL = "http://10.36.255.255:11435"  # Flask server IP and port
+SERVER_URL = "http://127.0.0.1"  # Local Flask server URL
+RESULTS_FILE = "training_results.txt"  # File to save training results
 
-def setup(rank, world_size, master_ip):
-    os.environ['MASTER_ADDR'] = master_ip  # Use the master's IP
+
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = '127.0.0.1'  # Master node's own IP
     os.environ['MASTER_PORT'] = '12355'
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
+
 
 def cleanup():
     dist.destroy_process_group()
@@ -31,39 +34,21 @@ class SimpleModel(nn.Module):
         x = self.fc2(x)
         return x
 
-def evaluate(model, test_loader, device):
-    model.eval()
-    test_loss = 0
-    correct = 0
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            test_loss += nn.CrossEntropyLoss()(output, target).item()  # Sum batch loss
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum().item()
+MODEL_SAVE_PATH = "simple_model.pth"  # Path to save the trained model
 
-    test_loss /= len(test_loader.dataset)
-    accuracy = 100. * correct / len(test_loader.dataset)
-    print(f"Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({accuracy:.2f}%)")
-    return test_loss, accuracy
-
-def train(rank, world_size, master_ip):
-    setup(rank, world_size, master_ip)
+def train(rank, world_size):
+    setup(rank, world_size)
     torch.manual_seed(0)
 
     # Enable MPS for Apple Silicon
     device = torch.device("mps")
-    print(f"Using device: {device}")
+    logging.info(f"Rank {rank} using device: {device}")
 
     # Data preparation
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
     dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST('./data', train=False, download=True, transform=transform)
-
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     train_loader = torch.utils.data.DataLoader(dataset, batch_size=32, sampler=sampler)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=32)
 
     # Model and optimizer
     model = SimpleModel().to(device)
@@ -72,58 +57,57 @@ def train(rank, world_size, master_ip):
 
     # Training loop
     model.train()
-    for epoch in range(5):
-        epoch_loss = 0
-        for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)  # Move data to MPS device
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
+    with open(RESULTS_FILE, "a") as f:
+        for epoch in range(5):
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(device), target.to(device)  # Move data to MPS device
+                optimizer.zero_grad()
+                output = model(data)
+                loss = criterion(output, target)
+                loss.backward()
+                optimizer.step()
 
-            epoch_loss += loss.item()
-
-            if rank == 0 and batch_idx % 10 == 0:
-                print(f"Epoch {epoch} Batch {batch_idx}, Loss: {loss.item()}")
-
-        # Aggregate loss across all ranks
-        total_loss = torch.tensor(epoch_loss).to(device)
-        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        avg_loss = total_loss.item() / world_size
-        if rank == 0:
-            print(f"Epoch {epoch}: Average Loss: {avg_loss}")
-
-    # Save model on rank 0
+                if rank == 0 and batch_idx % 10 == 0:
+                    log_message = f"Epoch {epoch} Batch {batch_idx}, Loss: {loss.item()}"
+                    logging.info(log_message)
+                    f.write(log_message + "\n")
+    
+    # Save the model only from the master process (rank 0)
     if rank == 0:
-        torch.save(model.state_dict(), "final_model.pth")
-        print("Final model saved to final_model.pth")
-
-    # Evaluate model on rank 0
-    if rank == 0:
-        test_loss, accuracy = evaluate(model, test_loader, device)
-        metrics = {"test_loss": test_loss, "accuracy": accuracy}
-        with open("evaluation_metrics.json", "w") as f:
-            json.dump(metrics, f)
-        print(f"Evaluation metrics saved to evaluation_metrics.json")
+        torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        logging.info(f"Model saved to {MODEL_SAVE_PATH}")
 
     cleanup()
 
 if __name__ == '__main__':
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("training.log"),
+            logging.StreamHandler()
+        ]
+    )
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--node_id', type=str, required=True, help='Unique identifier for this worker node')
+    parser.add_argument('--node_id', type=str, required=True, help='Unique identifier for this master node')
     parser.add_argument('--compute_power', type=str, required=True, help='Compute power description')
-    parser.add_argument('--location', type=str, required=True, help='Location of this worker node')
+    parser.add_argument('--location', type=str, required=True, help='Location of this master node')
     parser.add_argument('--world_size', type=int, required=True, help='Total number of nodes in the system')
     args = parser.parse_args()
 
-    # Query the Flask server to get the master's IP
-    response = requests.get(f"{SERVER_URL}/get_master_ip")
-    master_ip = response.json().get("master_ip")
-    if not master_ip:
-        raise RuntimeError("Failed to retrieve master IP from Flask server.")
-    print(f"Received master IP: {master_ip}")
+    # Register master node with the server
+    master_ip = "http://10.36.39.85:11435"  # Replace with the actual IP of the master node
+    data = {
+        "node_id": args.node_id,
+        "compute_power": args.compute_power,
+        "location": args.location,
+        "master_ip": master_ip,
+    }
+    response = requests.post(f"{SERVER_URL}/register", json=data)
+    logging.info(f"Server response: {response.json()}")
 
     # Start training
     world_size = args.world_size
-    torch.multiprocessing.spawn(train, args=(world_size, master_ip), nprocs=world_size)
+    torch.multiprocessing.spawn(train, args=(world_size,), nprocs=world_size)

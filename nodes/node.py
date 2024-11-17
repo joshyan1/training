@@ -7,11 +7,12 @@ import torch.multiprocessing as mp
 from torchvision import datasets, transforms
 import torch.nn as nn
 import torch.optim as optim
+import logging
 
-SERVER_URL = "http://10.36.255.255:11435"  # Flask server IP and port
+SERVER_URL = "http://127.0.0.1"  # Flask server IP and port
 
-def setup(rank, world_size, master_ip):
-    os.environ['MASTER_ADDR'] = master_ip  # Use the master's IP
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = '127.0.0.1'  # Ensure this is an IPv4 address
     os.environ['MASTER_PORT'] = '12355'
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
