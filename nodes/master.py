@@ -10,8 +10,8 @@ import torch.optim as optim
 
 SERVER_URL = "http://127.0.0.1:11435"  # Flask server IP and port
 
-def setup(rank, world_size, master_ip):
-    os.environ['MASTER_ADDR'] = master_ip  # Use the master's IP
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = '127.0.0.1'  # Master node's own IP
     os.environ['MASTER_PORT'] = '12355'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
@@ -30,8 +30,8 @@ class SimpleModel(nn.Module):
         x = self.fc2(x)
         return x
 
-def train(rank, world_size, master_ip):
-    setup(rank, world_size, master_ip)
+def train(rank, world_size):
+    setup(rank, world_size)
     torch.manual_seed(0)
 
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
@@ -60,17 +60,23 @@ def train(rank, world_size, master_ip):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--node_id', type=str, required=True, help='Unique identifier for this worker node')
+    parser.add_argument('--node_id', type=str, required=True, help='Unique identifier for this master node')
     parser.add_argument('--compute_power', type=str, required=True, help='Compute power description')
-    parser.add_argument('--location', type=str, required=True, help='Location of this worker node')
+    parser.add_argument('--location', type=str, required=True, help='Location of this master node')
     parser.add_argument('--world_size', type=int, required=True, help='Total number of nodes in the system')
     args = parser.parse_args()
 
-    # Query the Flask server to get the master's IP
-    response = requests.get(f"{SERVER_URL}/get_master_ip")
-    master_ip = response.json().get("master_ip")
-    print(f"Received master IP: {master_ip}")
+    # Register master node with the server
+    master_ip = "127.0.0.1"  # Replace with the actual IP of the master node
+    data = {
+        "node_id": args.node_id,
+        "compute_power": args.compute_power,
+        "location": args.location,
+        "master_ip": master_ip,
+    }
+    response = requests.post(f"{SERVER_URL}/register", json=data)
+    print(response.json())
 
     # Start training
     world_size = args.world_size
-    torch.multiprocessing.spawn(train, args=(world_size, master_ip), nprocs=world_size)
+    torch.multiprocessing.spawn(train, args=(world_size,), nprocs=world_size)
