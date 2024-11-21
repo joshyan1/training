@@ -1,4 +1,4 @@
-import base_model
+from .base_model import Model  # Import Model from base_model
 import os
 import argparse
 import functools

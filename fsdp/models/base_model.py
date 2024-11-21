@@ -1,3 +1,6 @@
+from abc import ABC, abstractmethod  # Import ABC and abstractmethod
+import torch.nn as nn  # Import nn for nn.Module
+
 class Model(ABC, nn.Module):
     """Base model class for all models."""
 
