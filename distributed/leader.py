@@ -1,8 +1,10 @@
 import threading
 import torch
 import logging
-from ../models/tut_model import Net
+import argparse
+from models.model import ResNet, ResidualBlock
 
+optimizer_function = lambda new_model: torch.optim.SGD(new_model.parameters(), lr=0.01, weight_decay = 0.001, momentum = 0.9)
 device = torch.device("mps")
 
 class Leader():
@@ -16,14 +18,17 @@ class Leader():
         self.batch_size = batch_size
         self.optimizer = optimizer_function(self.model)
         logging.info("Leader service initialized")
-        initialize_leader()
+        self.initialize_leader()
 
-    def initialize_leader():
+    def initialize_leader(self):
+        pass
         #set up GRPC
 
         #start server
 
-    def AddLearner(self, )
+    def AddLearner(self):
+        #set up Learner
+        pass
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Distributed Training Leader')
@@ -42,10 +47,10 @@ if __name__ == '__main__':
     parser.add_argument('--save-model', action='store_true', default=False,
                         help='For Saving the current Model')
     parser.add_argument('--learners', type=int, default=0, metavar='L',
-                        help=`Learner Count`)
+                        help='Learner Count')
     args = parser.parse_args()
 
-    model = Net()
+    model = ResNet(ResidualBlock, layers=[2,2,2,2]).to(device)
     leader = Leader(args.learners, model, args.epochs, args.batch_size)
 
 

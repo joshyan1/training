@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class Net(Model):
     def __init__(self):
         super(Net, self).__init__()
@@ -54,6 +53,3 @@ class Net(Model):
             print(
                 "Train Epoch: {} \tLoss: {:.6f}".format(epoch, ddp_loss[0] / ddp_loss[1])
             )
-
-model = Net()
-criterion = torch.nn.CrossEntropyLoss()
