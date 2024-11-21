@@ -74,10 +74,7 @@ class ResidualBlock(nn.Module):
         out = self.relu(out)
         return out
 
-# Criterion
+
+
 criterion = torch.nn.CrossEntropyLoss()
-
-# Optimizer
 optimizer_function = lambda new_model: torch.optim.SGD(new_model.parameters(), lr=0.01, weight_decay = 0.001, momentum = 0.9)
-
-# Data Loader
