@@ -65,6 +65,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     trainer_address = "10.36.159.40:10134"
+    trainer_address = "10.36.206.205:10134"
     #grpc_target = trainer_address.replace("https://", "")
     pokemon_port = args.port
     
