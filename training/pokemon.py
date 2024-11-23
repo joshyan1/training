@@ -64,19 +64,20 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=10135, help='Port you want the learner to use')
     args = parser.parse_args()
 
-    trainer_address = "https://light-lies-clap.loca.lt"
-    grpc_target = trainer_address.replace("https://", "")
+    trainer_address = "10.36.159.40:10134"
+    #grpc_target = trainer_address.replace("https://", "")
     pokemon_port = args.port
     
     print("finding channel")
-    channel = grpc.insecure_channel(f"{grpc_target}:{pokemon_port}")  # Add the port manually
+    channel = grpc.insecure_channel(f"{trainer_address}")  # Add the port manually
     print("channel found")
     trainer_stub = trainer_pb2_grpc.TrainerServiceStub(channel)
     print("trainer_stub added")
     print(pokemon_port)
-    local_ip = utils.start_localtunnel(pokemon_port)
+    #local_ip = utils.start_localtunnel(pokemon_port)
+    local_ip = utils.get_local_ip()
 
-    network_addr = f"{local_ip}"
+    network_addr = f"{local_ip}:{pokemon_port}"
     print(local_ip)
 
     print("Registering learner")

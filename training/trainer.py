@@ -61,15 +61,14 @@ def serve(learner_count, port=10134):
 	trainer = MockTrainer(learner_count)
 	trainer_pb2_grpc.add_TrainerServiceServicer_to_server(trainer, server)
     
-    #local_ip = utils.get_local_ip()
-
+	local_ip = utils.get_local_ip()
 
 	#local_ip = socket.gethostbyname(socket.gethostbyname(socket.getfqdn()))
-	server_address = f'0.0.0.0:{port}'  # Listen on all interfaces
+	server_address = f'{local_ip}:{port}'  # Listen on all interfaces
 	server.add_insecure_port(server_address)
 	server.start()
 	#trainer_ngrok_process, trainer_public_url = utils.start_localtunnel(port)
-	logging.info(f"Trainer started on :{port}")
+	logging.info(f"Trainer started on {server_address}")
 	#logging.info(f"{trainer_public_url}")
 
 	try:
