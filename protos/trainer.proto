@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+// Defines RPC for the Pokemon to call on the Trainer
+package trainer;
+
+// Message for registering a Pokemon with the Trainer
+message RegisterPokemonRequest {
+    int32 id = 1;
+    string network_addr = 2; // Address of the Pokemon
+}
+
+message RegisterPokemonResponse {
+    bool success = 1;
+    string message = 2;
+    int32 id = 3;
+}
+
+// Messages for forward pass
+message TrainingResults {
+    string pokemon_id = 1;
+    bytes input_data = 2; // Serialized tensor data
+}
+
+message TrainingResultsResponse {
+    bool success = 1;
+}
+
+// Service definition for Trainer
+service TrainerService {
+    rpc RegisterPokemon(RegisterPokemonRequest) returns (RegisterPokemonResponse);
+    rpc Training(TrainingResults) returns (TrainingResultsResponse);
+}
