@@ -1,34 +1,22 @@
-# Pokemon Trainer!
+# Arceus
+
+Hi everyone! Welcome to our distributed training framework, built from first principles leveraging model parallelism to optimize training on Apple M-series clusters! Right now, please train our MNIST neural network!
 
 ## Run
-First, set up a virtual environment and run it
-```
+To run this version of Arceus, please first initialize a virtual environment and install all required modules
+```shell
 python3 -m venv venv
 source venv/bin/activate
-```
-
-Now, please do a little install with 
-```
 pip install -r requirements.txt
 ```
 
-Run the `trainer.py` with 
+Now, to start training, initialize 3 separate terminals and run the following commands on each
 ```
-python3 -m training.trainer
-```
-
-This outputs something like 
-```
-INFO:root:Trainer started on 10.36.159.40:10134
+cd nn
+python3 device_server.py [port]
 ```
 
-Paste the IP and port to `trainer_address` in `pokemon.py`
+Finally, run the `coordinator.py` file
 ```
-trainer_address = 10.36.159.40:10134
+python3 coordinator.py
 ```
-
-Now, run your instances of `pokemon.py` with 
-```
-python3 -m training.pokemon --port xxxx
-```
-
