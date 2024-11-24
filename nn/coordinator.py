@@ -1,7 +1,8 @@
 import zmq
 import numpy as np
-from sklearn.datasets import fetch_openml
-from sklearn.model_selection import train_test_split
+import torch
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 from tqdm import tqdm
 
 class DistributedNeuralNetwork:
@@ -11,9 +12,16 @@ class DistributedNeuralNetwork:
         self.required_devices = len(layer_sizes) - 1
         self.quantization_bits = quantization_bits
         self.context = zmq.Context()
+        # Set device to MPS if available, else CPU
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        print(f"Using device: {self.device}")
         
     def quantize(self, x):
         """Quantize data before sending"""
+        # Convert torch tensor to numpy if needed
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+            
         max_val = np.max(np.abs(x))
         if max_val == 0:
             return x
@@ -51,8 +59,20 @@ class DistributedNeuralNetwork:
 
     def forward(self, X):
         """Distributed forward pass with quantized data"""
-        A = self.quantize(X)  # Quantize input
-        activations = [X]  # Keep original input for backprop
+        # Convert torch tensor to numpy if needed
+        if isinstance(X, torch.Tensor):
+            X = X.detach().cpu().numpy()
+            
+        # Ensure input is 2D
+        if len(X.shape) == 1:
+            X = X.reshape(1, -1)
+        elif len(X.shape) == 3:  # For MNIST images (batch_size, 28, 28)
+            X = X.reshape(X.shape[0], -1)
+        elif len(X.shape) == 4:  # For MNIST images with channel (batch_size, 1, 28, 28)
+            X = X.reshape(X.shape[0], -1)
+        
+        A = self.quantize(X)
+        activations = [X]
         
         for device_id in range(1, self.required_devices + 1):
             socket = self.device_connections[device_id]
@@ -92,18 +112,11 @@ class DistributedNeuralNetwork:
             })
             socket.recv_pyobj()  # Wait for acknowledgment
 
-    def train(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=256, learning_rate=0.1):
-        n_samples = X_train.shape[0]
-        n_batches = (n_samples + batch_size - 1) // batch_size
-        
-        # Define validation batch parameters
-        val_batch_size = 1000
-        n_val_batches = (len(X_val) + val_batch_size - 1) // val_batch_size
-        
+    def train(self, train_loader, val_loader, epochs=100, learning_rate=0.1):
         print("\nStarting distributed training across devices...")
-        print(f"Training samples: {n_samples}, Validation samples: {len(X_val)}")
-        print(f"Batch size: {batch_size}, Learning rate: {learning_rate}")
+        print(f"Learning rate: {learning_rate}")
         print(f"Quantization bits: {self.quantization_bits}")
+        print(f"Device: {self.device}")
         print("-" * 100)
         
         best_val_acc = 0
@@ -111,60 +124,57 @@ class DistributedNeuralNetwork:
         patience_counter = 0
         
         for epoch in range(epochs):
-            indices = np.random.permutation(n_samples)
-            X_shuffled = X_train[indices]
-            y_shuffled = y_train[indices]
-            
             epoch_loss = 0
             epoch_acc = 0
+            n_batches = 0
             
-            for i in range(n_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, n_samples)
-                
-                X_batch = X_shuffled[start_idx:end_idx]
-                y_batch = y_shuffled[start_idx:end_idx]
+            # Training loop
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data = data.to(self.device)
+                target = target.to(self.device)
                 
                 # Forward pass with quantized data
-                activations = self.forward(X_batch)
+                activations = self.forward(data)
                 y_pred = activations[-1]
                 
-                batch_loss = self.compute_loss(y_batch, y_pred)
-                batch_acc = self.compute_accuracy(y_batch, y_pred)
+                batch_loss = self.compute_loss(target.cpu().numpy(), y_pred)
+                batch_acc = self.compute_accuracy(target.cpu().numpy(), y_pred)
                 
                 epoch_loss += batch_loss
                 epoch_acc += batch_acc
+                n_batches += 1
                 
                 # Backward pass with quantized gradients
-                self.backward(activations, y_batch)
+                self.backward(activations, target.cpu().numpy())
                 self.update_parameters(learning_rate)
                 
-                if (i + 1) % 10 == 0:
+                if (batch_idx + 1) % 10 == 0:
                     print(f"\rEpoch {epoch+1}/{epochs} "
-                          f"[Batch {i+1}/{n_batches}] "
+                          f"[Batch {batch_idx+1}/{len(train_loader)}] "
                           f"Loss: {batch_loss:.4f} "
                           f"Acc: {batch_acc:.4f}", end="")
             
             epoch_loss /= n_batches
             epoch_acc /= n_batches
             
-            # Evaluate validation in chunks
+            # Validation loop
             val_loss = 0
             val_acc = 0
-            for i in range(n_val_batches):
-                start_idx = i * val_batch_size
-                end_idx = min((i + 1) * val_batch_size, len(X_val))
-                
-                X_val_batch = X_val[start_idx:end_idx]
-                y_val_batch = y_val[start_idx:end_idx]
-                
-                val_activations = self.forward(X_val_batch)
-                val_pred = val_activations[-1]
-                val_loss += self.compute_loss(y_val_batch, val_pred) * len(X_val_batch)
-                val_acc += self.compute_accuracy(y_val_batch, val_pred) * len(X_val_batch)
+            n_val_batches = 0
             
-            val_loss /= len(X_val)
-            val_acc /= len(X_val)
+            with torch.no_grad():
+                for data, target in val_loader:
+                    data = data.to(self.device)
+                    target = target.to(self.device)
+                    
+                    val_activations = self.forward(data)
+                    val_pred = val_activations[-1]
+                    val_loss += self.compute_loss(target.cpu().numpy(), val_pred)
+                    val_acc += self.compute_accuracy(target.cpu().numpy(), val_pred)
+                    n_val_batches += 1
+            
+            val_loss /= n_val_batches
+            val_acc /= n_val_batches
             
             print(f"\nEpoch {epoch+1:2d}/{epochs} - "
                   f"Loss: {epoch_loss:.4f} - "
@@ -187,8 +197,22 @@ class DistributedNeuralNetwork:
         return np.mean(predictions == y_true)
 
 def main():
-    # Initialize network
-    layer_sizes = [784, 128, 64, 10]
+    # Define transforms
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+    
+    # Load MNIST dataset using PyTorch
+    print("\nLoading MNIST dataset...")
+    train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
+    val_dataset = datasets.MNIST('data', train=False, transform=transform)
+    
+    # Ensure proper reshaping of data
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1000)
+    
+    layer_sizes = [784, 128, 64, 10]  # First layer must match flattened input size
     nn = DistributedNeuralNetwork(layer_sizes)
     
     # Connect to devices
@@ -207,13 +231,7 @@ def main():
     
     nn.initialize_devices()
     
-    print("\nLoading MNIST dataset...")
-    mnist = fetch_openml('mnist_784', version=1, as_frame=False)
-    X = mnist.data.astype('float32') / 255.
-    y = mnist.target.astype('int32')
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2)
-    
-    nn.train(X_train, y_train, X_val, y_val)
+    nn.train(train_loader, val_loader)
 
 if __name__ == "__main__":
     main() 

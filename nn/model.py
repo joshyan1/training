@@ -1,75 +1,64 @@
-import numpy as np
-from sklearn.datasets import fetch_openml
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 from tqdm import tqdm
 import sys
 import time
 
 print("Imported necessary libraries")
 
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
-
-def sigmoid_derivative(x):
-    return x * (1 - x)
-
-def softmax(x):
-    exp_x = np.exp(x - np.max(x, axis=1, keepdims=True))
-    return exp_x / np.sum(exp_x, axis=1, keepdims=True)
-
-def relu(x):
-    return np.maximum(0, x)
-
-def relu_derivative(x):
-    return np.where(x > 0, 1, 0)
-
-# Loss function
-def cross_entropy_loss(y_true, y_pred):
-    m = y_true.shape[0]
-    y_pred_clipped = np.clip(y_pred, 1e-12, 1. - 1e-12)
-    log_likelihood = -np.log(y_pred_clipped[range(m), y_true])
-    return np.sum(log_likelihood) / m
-
 class Device:
     def __init__(self, input_size, output_size, activation='relu', device_id=0):
         self.device_id = device_id
-        self.W = np.random.randn(input_size, output_size) * np.sqrt(2.0 / input_size)
-        self.b = np.zeros((1, output_size))
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        
+        # Initialize weights using PyTorch
+        self.W = torch.randn(input_size, output_size, device=self.device) * torch.sqrt(torch.tensor(2.0 / input_size))
+        self.b = torch.zeros(1, output_size, device=self.device)
+        self.W.requires_grad_(True)
+        self.b.requires_grad_(True)
+        
         self.activation = activation
 
     def forward(self, A_prev, training=True):
         """Forward pass on this device"""
-        self.Z = np.dot(A_prev, self.W) + self.b
+        self.A_prev = A_prev
+        self.Z = torch.mm(A_prev, self.W) + self.b
+        
         if self.activation == 'relu':
-            self.A = relu(self.Z)
+            self.A = F.relu(self.Z)
         elif self.activation == 'softmax':
-            self.A = softmax(self.Z)
+            self.A = F.softmax(self.Z, dim=1)
         return self.A
 
     def backward(self, dA, A_prev):
         """Backward pass on this device"""
-        m = A_prev.shape[0]
+        m = A_prev.size(0)
+        
         if self.activation == 'relu':
-            dZ = dA * relu_derivative(self.Z)
+            dZ = dA * (self.Z > 0)
         elif self.activation == 'softmax':
             dZ = dA
         
-        self.dW = np.dot(A_prev.T, dZ) / m
-        self.db = np.sum(dZ, axis=0, keepdims=True) / m
-        self.dA_prev = np.dot(dZ, self.W.T)
+        self.dW = torch.mm(A_prev.t(), dZ) / m
+        self.db = torch.sum(dZ, dim=0, keepdim=True) / m
+        self.dA_prev = torch.mm(dZ, self.W.t())
         return self.dA_prev
 
     def update_parameters(self, learning_rate):
         """Update parameters on this device"""
-        self.W -= learning_rate * self.dW
-        self.b -= learning_rate * self.db
+        with torch.no_grad():
+            self.W -= learning_rate * self.dW
+            self.b -= learning_rate * self.db
 
-# Neural Network class managing multiple devices
 class NeuralNetwork:
     def __init__(self, layer_sizes, learning_rate=0.1):
         self.learning_rate = learning_rate
         self.num_devices = len(layer_sizes) - 1
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        print(f"Using device: {self.device}")
         
         print(f"Initializing {self.num_devices} devices")
         self.devices = []
@@ -91,9 +80,9 @@ class NeuralNetwork:
 
     def backward(self, activations, y_true):
         """Backward pass through all devices"""
-        m = y_true.shape[0]
-        y_onehot = np.zeros_like(activations[-1])
-        y_onehot[np.arange(m), y_true] = 1
+        m = y_true.size(0)
+        y_onehot = torch.zeros_like(activations[-1], device=self.device)
+        y_onehot.scatter_(1, y_true.unsqueeze(1), 1)
         dA = activations[-1] - y_onehot
 
         for i in reversed(range(len(self.devices))):
@@ -101,83 +90,109 @@ class NeuralNetwork:
             device = self.devices[i]
             dA = device.backward(dA, A_prev)
 
-    def train(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=256):
-        n_samples = X_train.shape[0]
-        n_batches = (n_samples + batch_size - 1) // batch_size
+    def train(self, train_loader, val_loader, epochs=100, batch_size=256):
+        print("\nStarting training...")
+        print(f"Learning rate: {self.learning_rate}")
+        print(f"Device: {self.device}")
+        print("-" * 100)
+        
+        best_val_acc = 0
+        patience = 5
+        patience_counter = 0
         
         for epoch in range(1, epochs + 1):
-            indices = np.random.permutation(n_samples)
-            X_shuffled = X_train[indices]
-            y_shuffled = y_train[indices]
+            self.train_epoch(train_loader, epoch)
+            val_loss, val_acc = self.evaluate(val_loader)
             
-            epoch_loss = 0
-            for b in range(n_batches):
-                start_idx = b * batch_size
-                end_idx = min((b + 1) * batch_size, n_samples)
-                X_batch = X_shuffled[start_idx:end_idx]
-                y_batch = y_shuffled[start_idx:end_idx]
+            print(f"Validation - Loss: {val_loss:.4f}, Accuracy: {val_acc:.4f}")
+            print("-" * 100)
+            
+            # Early stopping logic
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+            else:
+                patience_counter += 1
                 
-                activations = self.forward(X_batch)
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after {epoch} epochs")
+                break
+
+    def train_epoch(self, train_loader, epoch):
+        total_loss = 0
+        total_acc = 0
+        n_batches = len(train_loader)
+        
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(self.device), target.to(self.device)
+            
+            # Forward pass
+            activations = self.forward(data)
+            y_pred = activations[-1]
+            
+            # Compute loss
+            loss = F.cross_entropy(y_pred, target)
+            acc = (y_pred.argmax(dim=1) == target).float().mean()
+            
+            # Backward pass
+            self.backward(activations, target)
+            
+            # Update parameters
+            for device in self.devices:
+                device.update_parameters(self.learning_rate)
+            
+            total_loss += loss.item()
+            total_acc += acc.item()
+            
+            if (batch_idx + 1) % 10 == 0:
+                print(f"\rEpoch {epoch} [{batch_idx+1}/{n_batches}] "
+                      f"Loss: {loss.item():.4f} "
+                      f"Acc: {acc.item():.4f}", end="")
+        
+        avg_loss = total_loss / n_batches
+        avg_acc = total_acc / n_batches
+        print(f"\nEpoch {epoch} - Average Loss: {avg_loss:.4f}, Average Accuracy: {avg_acc:.4f}")
+
+    def evaluate(self, val_loader):
+        total_loss = 0
+        total_acc = 0
+        n_batches = len(val_loader)
+        
+        with torch.no_grad():
+            for data, target in val_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                
+                activations = self.forward(data, training=False)
                 y_pred = activations[-1]
-                batch_loss = self.compute_loss(y_batch, y_pred)
-                epoch_loss += batch_loss
                 
-                self.backward(activations, y_batch)
-                self.update_parameters()
-            
-            epoch_loss /= n_batches
-            
-            if epoch % 10 == 0 or epoch == 1:
-                train_acc = self.evaluate_accuracy(y_train, self.forward(X_train)[-1])
-                val_acc = self.evaluate_accuracy(y_val, self.forward(X_val)[-1])
-                print(f"Epoch {epoch:3d}: Loss = {epoch_loss:.4f}, Train Acc = {train_acc:.4f}, Val Acc = {val_acc:.4f}")
+                loss = F.cross_entropy(y_pred, target)
+                acc = (y_pred.argmax(dim=1) == target).float().mean()
+                
+                total_loss += loss.item()
+                total_acc += acc.item()
+        
+        return total_loss / n_batches, total_acc / n_batches
 
-    def compute_loss(self, y_true, y_pred):
-        return cross_entropy_loss(y_true, y_pred)
-
-    def update_parameters(self):
-        """
-        Update parameters of all devices.
-        """
-        for i, device in enumerate(self.devices):
-            device.update_parameters(self.learning_rate)
-
-    def predict(self, X):
-        """
-        Predict class labels for samples in X.
-        """
-        activations = self.forward(X)
-        y_pred = activations[-1]
-        return np.argmax(y_pred, axis=1)
-
-    def evaluate_accuracy(self, y_true, y_pred):
-        """
-        Evaluate accuracy given true labels and predicted probabilities.
-        """
-        predictions = np.argmax(y_pred, axis=1)
-        accuracy = np.mean(predictions == y_true)
-        return accuracy
-
-# Utility function to load and preprocess MNIST data
-def load_mnist():
-    print("Loading MNIST dataset...")
-    mnist = fetch_openml('mnist_784', version=1, as_frame=False)
-    X = mnist['data'].astype(np.float32) / 255.0  # Normalize to [0, 1]
-    y = mnist['target'].astype(int)
-    print(f"Loaded {len(X)} samples")
-    return X, y
-
-# Main function to run the training
 def main():
+    # Define transforms
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+    
+    # Load MNIST dataset
     print("Loading MNIST dataset...")
-    X, y = load_mnist()
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+    train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
+    val_dataset = datasets.MNIST('data', train=False, transform=transform)
+    
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1000)
     
     layer_sizes = [784, 128, 64, 10]
-    print(f"Creating neural network with {len(layer_sizes)-1} devices")
+    print(f"Creating neural network with architecture: {layer_sizes}")
     nn = NeuralNetwork(layer_sizes, learning_rate=0.1)
     
-    nn.train(X_train, y_train, X_val, y_val, epochs=100, batch_size=256)
+    nn.train(train_loader, val_loader, epochs=100)
 
 if __name__ == "__main__":
     main()

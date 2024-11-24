@@ -1,16 +1,27 @@
 import zmq
-import pickle
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class Device:
     def __init__(self, input_size, output_size, activation='relu', device_id=0):
         self.device_id = device_id
-        self.W = np.random.randn(input_size, output_size) * np.sqrt(2.0 / input_size)
-        self.b = np.zeros((1, output_size))
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        
+        # Initialize weights using PyTorch
+        self.W = torch.randn(input_size, output_size, device=self.device) * np.sqrt(2.0 / input_size)
+        self.b = torch.zeros(1, output_size, device=self.device)
+        self.W.requires_grad_(True)
+        self.b.requires_grad_(True)
+        
         self.activation = activation
         
     def quantize(self, x, bits=8):
         """Quantize gradients to reduce communication overhead"""
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+            
         max_val = np.max(np.abs(x))
         if max_val == 0:
             return x
@@ -20,35 +31,82 @@ class Device:
         return quantized / scale
     
     def forward(self, A_prev):
+        """Forward pass with proper dimension handling"""
+        # Convert numpy array to torch tensor if needed
+        if isinstance(A_prev, np.ndarray):
+            # Ensure input is 2D
+            if len(A_prev.shape) == 1:
+                A_prev = A_prev.reshape(1, -1)
+            elif len(A_prev.shape) == 3:  # For MNIST images
+                A_prev = A_prev.reshape(A_prev.shape[0], -1)
+            elif len(A_prev.shape) == 4:  # For MNIST images with channel
+                A_prev = A_prev.reshape(A_prev.shape[0], -1)
+            
+            A_prev = torch.from_numpy(A_prev).float().to(self.device)
+        
+        # Ensure tensor is 2D
+        if len(A_prev.shape) == 1:
+            A_prev = A_prev.unsqueeze(0)
+        elif len(A_prev.shape) > 2:
+            A_prev = A_prev.view(A_prev.size(0), -1)
+            
         self.A_prev = A_prev
-        self.Z = np.dot(A_prev, self.W) + self.b
+        
+        # Debug prints
+        print(f"A_prev shape: {A_prev.shape}")
+        print(f"W shape: {self.W.shape}")
+        print(f"b shape: {self.b.shape}")
+        
+        self.Z = torch.mm(A_prev, self.W) + self.b
         
         if self.activation == 'relu':
-            self.A = np.maximum(0, self.Z)
+            self.A = F.relu(self.Z)
         else:  # softmax
-            exp_z = np.exp(self.Z - np.max(self.Z, axis=1, keepdims=True))
-            self.A = exp_z / np.sum(exp_z, axis=1, keepdims=True)
-        return self.A
+            self.A = F.softmax(self.Z, dim=1)
+            
+        return self.A.detach().cpu().numpy()
     
     def backward(self, dA):
-        m = self.A_prev.shape[0]
+        """Backward pass with proper dimension handling"""
+        # Convert numpy array to torch tensor
+        if isinstance(dA, np.ndarray):
+            # Ensure input is 2D
+            if len(dA.shape) == 1:
+                dA = dA.reshape(1, -1)
+            elif len(dA.shape) > 2:
+                dA = dA.reshape(dA.shape[0], -1)
+            
+            dA = torch.from_numpy(dA).float().to(self.device)
+        
+        # Ensure tensor is 2D
+        if len(dA.shape) == 1:
+            dA = dA.unsqueeze(0)
+        elif len(dA.shape) > 2:
+            dA = dA.view(dA.size(0), -1)
+            
+        m = self.A_prev.size(0)
         
         if self.activation == 'relu':
             dZ = dA * (self.Z > 0)
         else:  # softmax
             dZ = dA
             
-        # Quantize gradients
-        self.dW = self.quantize(np.dot(self.A_prev.T, dZ) / m)
-        self.db = self.quantize(np.sum(dZ, axis=0, keepdims=True) / m)
-        dA_prev = self.quantize(np.dot(dZ, self.W.T))
+        # Compute gradients
+        self.dW = self.quantize(torch.mm(self.A_prev.t(), dZ).detach().cpu().numpy() / m)
+        self.db = self.quantize(torch.sum(dZ, dim=0, keepdim=True).detach().cpu().numpy() / m)
+        dA_prev = self.quantize(torch.mm(dZ, self.W.t()).detach().cpu().numpy())
         
         return dA_prev
     
     def update(self, learning_rate):
-        # Apply quantized updates
-        self.W -= learning_rate * self.dW
-        self.b -= learning_rate * self.db
+        # Convert numpy gradients to torch tensors
+        dW = torch.from_numpy(self.dW).float().to(self.device)
+        db = torch.from_numpy(self.db).float().to(self.device)
+        
+        # Apply updates
+        with torch.no_grad():
+            self.W -= learning_rate * dW
+            self.b -= learning_rate * db
 
 class DeviceServer:
     def __init__(self, port):
