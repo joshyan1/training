@@ -44,18 +44,34 @@ class DistributedNeuralNetwork:
             return False
 
     def initialize_devices(self):
-        """Initialize all connected devices"""
+        """Initialize all connected devices with their layer configurations"""
+        layers_per_device = len(self.layer_sizes) // len(self.device_connections)
+        extra_layers = len(self.layer_sizes) % len(self.device_connections)
+        
+        current_layer = 0
         for device_id, socket in self.device_connections.items():
-            i = device_id - 1
+            # Calculate number of layers for this device
+            n_layers = layers_per_device + (1 if device_id <= extra_layers else 0)
+            
+            # Create layer configurations for this device
+            layer_configs = []
+            for i in range(n_layers):
+                if current_layer < len(self.layer_sizes) - 1:
+                    layer_configs.append({
+                        'input_size': self.layer_sizes[current_layer],
+                        'output_size': self.layer_sizes[current_layer + 1],
+                        'activation': 'relu' if current_layer < len(self.layer_sizes) - 2 else 'softmax'
+                    })
+                    current_layer += 1
+            
+            # Initialize device with its layer configurations
             socket.send_pyobj({
                 'command': 'init',
-                'input_size': self.layer_sizes[i],
-                'output_size': self.layer_sizes[i + 1],
-                'activation': 'relu' if i < self.required_devices - 1 else 'softmax',
+                'layer_configs': layer_configs,
                 'device_id': device_id
             })
             response = socket.recv_pyobj()
-            print(f"Initialized device {device_id}: {response}")
+            print(f"Initialized device {device_id} with {len(layer_configs)} layers: {response}")
 
     def forward(self, X):
         """Distributed forward pass with quantized data"""
