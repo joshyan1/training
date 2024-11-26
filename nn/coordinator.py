@@ -247,7 +247,7 @@ def main():
     train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
     val_dataset = datasets.MNIST('data', train=False, transform=transform)
     
-    train_loader = DataLoader(train_dataset, batch_size=1200, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1000)
     
     layer_sizes = [784, 128, 64, 10]
