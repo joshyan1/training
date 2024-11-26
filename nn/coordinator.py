@@ -29,21 +29,36 @@ class DistributedNeuralNetwork:
         quantized = np.round(x * scale)
         return quantized / scale
 
-    def connect_to_device(self, port):
-        """Connect to a device on the specified port if under max devices"""
+    def connect_to_device(self, ip, port):
+        """Connect to a device on the specified IP and port"""
         if len(self.device_connections) >= self.max_devices:
-            print(f"Maximum number of devices ({self.max_devices}) reached. Skipping connection to port {port}")
+            print(f"Maximum number of devices ({self.max_devices}) reached. Skipping connection to {ip}:{port}")
             return False
             
         try:
             socket = self.context.socket(zmq.REQ)
-            socket.connect(f"tcp://localhost:{port}")
+            socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 second timeout
+            socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 second timeout
+            
+            socket.connect(f"tcp://{ip}:{port}")
+            
+            socket.send_pyobj({
+                'command': 'ping'
+            })
+            response = socket.recv_pyobj()
+            
             device_id = len(self.device_connections) + 1
-            self.device_connections[device_id] = socket
-            print(f"Connected to device {device_id} at port {port} ({len(self.device_connections)}/{self.max_devices} devices)")
+            self.device_connections[device_id] = {
+                'socket': socket,
+                'address': f"{ip}:{port}"
+            }
+            print(f"Connected to device {device_id} at {ip}:{port} ({len(self.device_connections)}/{self.max_devices} devices)")
             return True
+            
         except Exception as e:
-            print(f"Failed to connect to device at port {port}: {e}")
+            print(f"Failed to connect to device at {ip}:{port}: {e}")
+            if 'socket' in locals():
+                socket.close()
             return False
 
     def initialize_devices(self):
@@ -84,12 +99,12 @@ class DistributedNeuralNetwork:
             device_layer_map[device_id] = layer_indices
             
             # Initialize device with its layer configurations
-            socket.send_pyobj({
+            socket['socket'].send_pyobj({
                 'command': 'init',
                 'layer_configs': layer_configs,
                 'device_id': device_id
             })
-            response = socket.recv_pyobj()
+            response = socket['socket'].recv_pyobj()
             print(f"Initialized device {device_id} with layers {layer_indices}: {response}")
         
         self.device_layer_map = device_layer_map
@@ -113,7 +128,7 @@ class DistributedNeuralNetwork:
         
         # Forward through each device in order
         for device_id in sorted(self.device_connections.keys()):
-            socket = self.device_connections[device_id]
+            socket = self.device_connections[device_id]['socket']
             socket.send_pyobj({
                 'command': 'forward',
                 'input': A
@@ -133,7 +148,7 @@ class DistributedNeuralNetwork:
         
         # Backward through each device in reverse order
         for device_id in sorted(self.device_connections.keys(), reverse=True):
-            socket = self.device_connections[device_id]
+            socket = self.device_connections[device_id]['socket']
             socket.send_pyobj({
                 'command': 'backward',
                 'grad_input': dA
@@ -144,7 +159,7 @@ class DistributedNeuralNetwork:
     def update_parameters(self, learning_rate):
         """Update parameters on all devices"""
         for device_id in sorted(self.device_connections.keys()):
-            socket = self.device_connections[device_id]
+            socket = self.device_connections[device_id]['socket']
             socket.send_pyobj({
                 'command': 'update',
                 'learning_rate': learning_rate

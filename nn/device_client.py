@@ -5,11 +5,27 @@ import time
 import signal
 import os
 
+def get_local_ip():
+    """Get the local IP address of this machine"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Connect to an external server (doesn't actually send anything)
+        s.connect(('8.8.8.8', 80))
+        IP = s.getsockname()[0]
+    except Exception:
+        # Fallback to localhost if unable to determine IP
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
 class DeviceClient:
     def __init__(self, api_url="http://localhost:4000", device_port=None):
         self.api_url = api_url
         self.device_port = device_port or self._find_available_port(start_port=5001)
         self.device_process = None
+        self.local_ip = get_local_ip()
         
     def _find_available_port(self, start_port):
         """Find an available port starting from start_port"""
@@ -19,7 +35,8 @@ class DeviceClient:
         while port < start_port + 100:  # Try up to 100 ports
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                sock.bind(('localhost', port))
+                # Bind to all interfaces instead of just localhost
+                sock.bind(('0.0.0.0', port))
                 sock.close()
                 return port
             except OSError:
@@ -62,7 +79,10 @@ class DeviceClient:
         try:
             response = requests.post(
                 f"{self.api_url}/api/devices/register",
-                json={'port': self.device_port}
+                json={
+                    'port': self.device_port,
+                    'ip': self.local_ip
+                }
             )
             
             if response.status_code == 201:

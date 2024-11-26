@@ -42,3 +42,12 @@ Learning rate: 0.1
 Quantization bits: 8
 Device: mps
 ```
+
+## Network Setup
+
+To run Arceus across multiple machines on your local network:
+
+1. Start the API server on your main machine:
+```shell
+python -m api.server
+```

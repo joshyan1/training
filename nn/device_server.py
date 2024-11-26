@@ -133,7 +133,7 @@ class DeviceServer:
         # Setup ZMQ context and socket
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REP)
-        self.socket.bind(f"tcp://*:{port}")
+        self.socket.bind(f"tcp://0.0.0.0:{port}")
         
     def start(self):
         print(f"Starting device server on port {self.port}")
