@@ -38,6 +38,13 @@ class DistributedNeuralNetwork:
             
         try:
             channel = grpc.insecure_channel(f'localhost:{port}')
+            # Add timeout to connection attempt
+            try:
+                grpc.channel_ready_future(channel).result(timeout=5)
+            except grpc.FutureTimeoutError:
+                print(f"Timeout while connecting to port {port}")
+                return False
+                
             stub = neural_network_pb2_grpc.NeuralNetworkServiceStub(channel)
             device_id = len(self.device_connections) + 1
             self.device_connections[device_id] = stub
@@ -50,8 +57,34 @@ class DistributedNeuralNetwork:
     def initialize_devices(self):
         """Initialize devices with balanced layer distribution"""
         num_devices = len(self.device_connections)
+        if num_devices == 0:
+            raise Exception("No devices connected. Please connect devices before initializing.")
+        
+        # Verify connections are alive
+        dead_devices = []
+        for device_id, stub in self.device_connections.items():
+            try:
+                # Try a simple RPC call to check connection
+                request = neural_network_pb2.InitializeRequest(
+                    layer_configs=[],
+                    device_id=device_id
+                )
+                stub.Initialize(request)
+            except Exception as e:
+                print(f"Device {device_id} appears to be dead: {e}")
+                dead_devices.append(device_id)
+        
+        # Remove dead devices
+        for device_id in dead_devices:
+            del self.device_connections[device_id]
+        
+        if len(self.device_connections) == 0:
+            raise Exception("All devices are dead. Please reconnect devices.")
+        
+        num_devices = len(self.device_connections)
         num_layers = len(self.layer_sizes) - 1
         
+        # Calculate layers per device
         layers_per_device = num_layers // num_devices
         extra_layers = num_layers % num_devices
         
@@ -62,17 +95,22 @@ class DistributedNeuralNetwork:
         current_layer = 0
         device_layer_map = {}
         
-        for device_id, stub in self.device_connections.items():
-            n_layers = layers_per_device + (1 if device_id <= extra_layers else 0)
+        # Distribute layers to devices
+        for device_id in sorted(self.device_connections.keys()):
+            # Calculate number of layers for this device
+            device_layers = layers_per_device + (1 if extra_layers > 0 else 0)
+            extra_layers = max(0, extra_layers - 1)
+            
             layer_configs = []
             layer_indices = []
             
-            for _ in range(n_layers):
-                if current_layer < len(self.layer_sizes) - 1:
+            # Add layers for this device
+            for _ in range(device_layers):
+                if current_layer < num_layers:
                     layer_config = neural_network_pb2.LayerConfig(
                         input_size=self.layer_sizes[current_layer],
                         output_size=self.layer_sizes[current_layer + 1],
-                        activation='relu' if current_layer < len(self.layer_sizes) - 2 else 'softmax'
+                        activation='relu' if current_layer < num_layers - 1 else 'softmax'
                     )
                     layer_configs.append(layer_config)
                     layer_indices.append(current_layer)
@@ -80,6 +118,7 @@ class DistributedNeuralNetwork:
             
             device_layer_map[device_id] = layer_indices
             
+            # Initialize device with its layers
             request = neural_network_pb2.InitializeRequest(
                 layer_configs=layer_configs,
                 device_id=device_id
@@ -229,54 +268,7 @@ class DistributedNeuralNetwork:
         predictions = np.argmax(y_pred, axis=1)
         return np.mean(predictions == y_true)
 
-def main():
-    # Define transforms
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-    
-    # Load MNIST dataset using PyTorch
-    print("\nLoading MNIST dataset...")
-    train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
-    val_dataset = datasets.MNIST('data', train=False, transform=transform)
-    
-    train_loader = DataLoader(train_dataset, batch_size=1200, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1000)
-    
-    layer_sizes = [784, 128, 64, 10]
-    nn = DistributedNeuralNetwork(layer_sizes)
-    
-    # Connect to all available devices up to max_devices
-    ports = [5001, 5002]  # Can be extended or loaded from config
-    connected_ports = []
-    
-    print("\nAttempting to connect to available devices...")
-    for port in ports:
-        if len(connected_ports) >= nn.max_devices:
-            print(f"\nReached maximum number of devices ({nn.max_devices}). Stopping connection attempts.")
-            break
-            
-        if nn.connect_to_device(port):
-            connected_ports.append(port)
-    
-    if not connected_ports:
-        print("No devices connected. Exiting.")
-        return
-        
-    print(f"\nSuccessfully connected to {len(connected_ports)} devices")
-    
-    if len(connected_ports) < len(layer_sizes) - 1:
-        print(f"Warning: Running with fewer devices ({len(connected_ports)}) than layers ({len(layer_sizes) - 1})")
-        print("Some devices will handle multiple layers")
-    
-    response = input("\nStart training? (y/n): ").lower()
-    if response != 'y':
-        print("Training cancelled.")
-        return
-    
-    nn.initialize_devices()
-    nn.train(train_loader, val_loader)
-
-if __name__ == "__main__":
-    main() 
+# Remove the main() function and its call at the bottom of the file
+# Delete or comment out these lines:
+# if __name__ == "__main__":
+#     main() 
