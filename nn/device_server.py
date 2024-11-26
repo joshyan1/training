@@ -1,177 +1,156 @@
-import zmq
 import numpy as np
+import grpc
+from concurrent import futures
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from protos import neural_network_pb2
+from protos import neural_network_pb2_grpc
 
-class Layer:
+class NeuralLayer:
     def __init__(self, input_size, output_size, activation='relu'):
-        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-        
-        # Initialize weights using PyTorch
-        self.W = torch.randn(input_size, output_size, device=self.device) * np.sqrt(2.0 / input_size)
-        self.b = torch.zeros(1, output_size, device=self.device)
-        self.W.requires_grad_(True)
-        self.b.requires_grad_(True)
-        
+        self.weights = torch.randn(input_size, output_size) * np.sqrt(2. / input_size)
+        self.biases = torch.zeros(output_size)
         self.activation = activation
         
-    def forward(self, A_prev):
-        """Forward pass for a single layer"""
-        self.A_prev = A_prev
-        self.Z = torch.mm(A_prev, self.W) + self.b
+        # Gradients
+        self.weight_gradients = None
+        self.bias_gradients = None
+        
+        # Cache for backprop
+        self.input_cache = None
+        self.output_cache = None
+        
+    def forward(self, X):
+        self.input_cache = X
+        Z = torch.matmul(X, self.weights) + self.biases
         
         if self.activation == 'relu':
-            self.A = F.relu(self.Z)
-        else:  # softmax
-            self.A = F.softmax(self.Z, dim=1)
-        return self.A
-    
+            A = F.relu(Z)
+        elif self.activation == 'softmax':
+            A = F.softmax(Z, dim=1)
+        else:
+            A = Z
+            
+        self.output_cache = A
+        return A
+        
     def backward(self, dA):
-        """Backward pass for a single layer"""
-        m = self.A_prev.size(0)
-        
         if self.activation == 'relu':
-            dZ = dA * (self.Z > 0)
-        else:  # softmax
+            dZ = dA * (self.output_cache > 0).float()
+        else:  # For softmax, dA is already dZ
             dZ = dA
             
-        self.dW = torch.mm(self.A_prev.t(), dZ) / m
-        self.db = torch.sum(dZ, dim=0, keepdim=True) / m
-        dA_prev = torch.mm(dZ, self.W.t())
+        m = self.input_cache.shape[0]
         
-        return dA_prev
-    
+        self.weight_gradients = torch.matmul(self.input_cache.t(), dZ) / m
+        self.bias_gradients = torch.sum(dZ, dim=0) / m
+        
+        return torch.matmul(dZ, self.weights.t())
+        
     def update(self, learning_rate):
-        """Update parameters for a single layer"""
-        with torch.no_grad():
-            self.W -= learning_rate * self.dW
-            self.b -= learning_rate * self.db
+        self.weights -= learning_rate * self.weight_gradients
+        self.biases -= learning_rate * self.bias_gradients
 
-class Device:
-    def __init__(self, layer_configs, device_id=0):
-        """
-        Initialize device with multiple layers
-        layer_configs: list of dicts, each containing:
-            - input_size
-            - output_size
-            - activation
-        """
-        self.device_id = device_id
+class NeuralNetworkServicer(neural_network_pb2_grpc.NeuralNetworkServiceServicer):
+    def __init__(self):
+        self.layers = []
         self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         
-        # Initialize layers
-        self.layers = []
-        for config in layer_configs:
-            layer = Layer(
-                input_size=config['input_size'],
-                output_size=config['output_size'],
-                activation=config['activation']
-            )
-            self.layers.append(layer)
-        
-    def quantize(self, x, bits=8):
-        """Quantize gradients to reduce communication overhead"""
-        if isinstance(x, torch.Tensor):
-            x = x.detach().cpu().numpy()
-            
-        max_val = np.max(np.abs(x))
-        if max_val == 0:
-            return x
-        
-        scale = (2 ** (bits - 1) - 1) / max_val
-        quantized = np.round(x * scale)
-        return quantized / scale
-    
-    def forward(self, A_prev):
-        """Forward pass through all layers in this device"""
-        # Convert numpy array to torch tensor if needed
-        if isinstance(A_prev, np.ndarray):
-            # Ensure input is 2D
-            if len(A_prev.shape) == 1:
-                A_prev = A_prev.reshape(1, -1)
-            elif len(A_prev.shape) == 3:  # For MNIST images
-                A_prev = A_prev.reshape(A_prev.shape[0], -1)
-            elif len(A_prev.shape) == 4:  # For MNIST images with channel
-                A_prev = A_prev.reshape(A_prev.shape[0], -1)
-            
-            A_prev = torch.from_numpy(A_prev).float().to(self.device)
-        
-        # Store all activations for backward pass
-        self.activations = [A_prev]
-        A = A_prev
-        
-        # Forward through each layer
-        for layer in self.layers:
-            A = layer.forward(A)
-            self.activations.append(A)
-            
-        return A.detach().cpu().numpy()
-    
-    def backward(self, dA):
-        """Backward pass through all layers in this device"""
-        if isinstance(dA, np.ndarray):
-            dA = torch.from_numpy(dA).float().to(self.device)
-        
-        # Backward through each layer in reverse
-        for i in reversed(range(len(self.layers))):
-            layer = self.layers[i]
-            dA = layer.backward(dA)
-            
-        return dA.detach().cpu().numpy()
-    
-    def update(self, learning_rate):
-        """Update parameters of all layers"""
-        for layer in self.layers:
-            layer.update(learning_rate)
-
-class DeviceServer:
-    def __init__(self, port):
-        self.port = port
-        self.device = None
-        
-        # Setup ZMQ context and socket
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.REP)
-        self.socket.bind(f"tcp://*:{port}")
-        
-    def start(self):
-        print(f"Starting device server on port {self.port}")
-        
-        while True:
-            message = self.socket.recv_pyobj()
-            command = message['command']
-            
-            if command == 'init':
-                self.device = Device(
-                    layer_configs=message['layer_configs'],
-                    device_id=message['device_id']
+    def Initialize(self, request, context):
+        """Initialize the neural network layers"""
+        try:
+            self.layers = []
+            for layer_config in request.layer_configs:
+                layer = NeuralLayer(
+                    input_size=layer_config.input_size,
+                    output_size=layer_config.output_size,
+                    activation=layer_config.activation
                 )
-                self.socket.send_pyobj({
-                    'status': 'initialized',
-                    'device_id': self.device.device_id
-                })
+                self.layers.append(layer)
                 
-            elif command == 'forward':
-                A_prev = message['input']
-                output = self.device.forward(A_prev)
-                self.socket.send_pyobj({'output': output})
-                
-            elif command == 'backward':
-                dA = message['grad_input']
-                dA_prev = self.device.backward(dA)
-                self.socket.send_pyobj({'grad_output': dA_prev})
-                
-            elif command == 'update':
-                self.device.update(message['learning_rate'])
-                self.socket.send_pyobj({'status': 'updated'})
+            return neural_network_pb2.InitializeResponse(
+                status="success",
+                message=f"Initialized {len(self.layers)} layers"
+            )
+        except Exception as e:
+            return neural_network_pb2.InitializeResponse(
+                status="error",
+                message=str(e)
+            )
+
+    def Forward(self, request, context):
+        """Forward pass through the layers"""
+        try:
+            # Reshape input data
+            input_data = torch.tensor(
+                request.input, 
+                dtype=torch.float32
+            ).reshape(request.batch_size, request.input_size)
+            
+            # Forward through all layers
+            A = input_data
+            for layer in self.layers:
+                A = layer.forward(A)
+            
+            # Prepare response
+            return neural_network_pb2.ForwardResponse(
+                output=A.flatten().tolist(),
+                batch_size=A.shape[0],
+                output_size=A.shape[1]
+            )
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return neural_network_pb2.ForwardResponse()
+
+    def Backward(self, request, context):
+        """Backward pass for gradient computation"""
+        try:
+            # Reshape gradient input
+            grad_input = torch.tensor(
+                request.grad_input,
+                dtype=torch.float32
+            ).reshape(request.batch_size, request.input_size)
+            
+            # Backward through all layers
+            dA = grad_input
+            for layer in reversed(self.layers):
+                dA = layer.backward(dA)
+            
+            # Prepare response
+            return neural_network_pb2.BackwardResponse(
+                grad_output=dA.flatten().tolist(),
+                batch_size=dA.shape[0],
+                output_size=dA.shape[1]
+            )
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return neural_network_pb2.BackwardResponse()
+
+    def Update(self, request, context):
+        """Update parameters using computed gradients"""
+        try:
+            for layer in self.layers:
+                layer.update(request.learning_rate)
+            return neural_network_pb2.UpdateResponse(status="success")
+        except Exception as e:
+            return neural_network_pb2.UpdateResponse(status=str(e))
+
+def serve(port):
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    neural_network_pb2_grpc.add_NeuralNetworkServiceServicer_to_server(
+        NeuralNetworkServicer(), server
+    )
+    server.add_insecure_port(f'[::]:{port}')
+    server.start()
+    print(f"Device server started on port {port}")
+    server.wait_for_termination()
 
 if __name__ == '__main__':
-    import sys
-    if len(sys.argv) != 2:
-        print("Usage: python device_server.py <port>")
-        sys.exit(1)
-        
-    port = int(sys.argv[1])
-    device_server = DeviceServer(port)
-    device_server.start()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=5001)
+    args = parser.parse_args()
+    serve(args.port)

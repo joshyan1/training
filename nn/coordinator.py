@@ -1,9 +1,11 @@
-import zmq
 import numpy as np
 import torch
+import grpc
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
+from protos import neural_network_pb2
+from protos import neural_network_pb2_grpc
 
 class DistributedNeuralNetwork:
     def __init__(self, layer_sizes, quantization_bits=8):
@@ -11,7 +13,6 @@ class DistributedNeuralNetwork:
         self.max_devices = len(layer_sizes) - 1  # Maximum number of devices = number of layers
         self.device_connections = {}
         self.quantization_bits = quantization_bits
-        self.context = zmq.Context()
         self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         print(f"Using device: {self.device}")
         print(f"Maximum number of devices: {self.max_devices}")
@@ -36,10 +37,10 @@ class DistributedNeuralNetwork:
             return False
             
         try:
-            socket = self.context.socket(zmq.REQ)
-            socket.connect(f"tcp://localhost:{port}")
+            channel = grpc.insecure_channel(f'localhost:{port}')
+            stub = neural_network_pb2_grpc.NeuralNetworkServiceStub(channel)
             device_id = len(self.device_connections) + 1
-            self.device_connections[device_id] = socket
+            self.device_connections[device_id] = stub
             print(f"Connected to device {device_id} at port {port} ({len(self.device_connections)}/{self.max_devices} devices)")
             return True
         except Exception as e:
@@ -51,7 +52,6 @@ class DistributedNeuralNetwork:
         num_devices = len(self.device_connections)
         num_layers = len(self.layer_sizes) - 1
         
-        # Calculate base layers per device and extras
         layers_per_device = num_layers // num_devices
         extra_layers = num_layers % num_devices
         
@@ -60,37 +60,32 @@ class DistributedNeuralNetwork:
         print(f"Extra layers to distribute: {extra_layers}")
         
         current_layer = 0
-        device_layer_map = {}  # Keep track of which layers are on which device
+        device_layer_map = {}
         
-        for device_id, socket in self.device_connections.items():
-            # Calculate number of layers for this device
+        for device_id, stub in self.device_connections.items():
             n_layers = layers_per_device + (1 if device_id <= extra_layers else 0)
-            
-            # Create layer configurations for this device
             layer_configs = []
-            layer_indices = []  # Store indices of layers on this device
+            layer_indices = []
             
             for _ in range(n_layers):
                 if current_layer < len(self.layer_sizes) - 1:
-                    layer_configs.append({
-                        'input_size': self.layer_sizes[current_layer],
-                        'output_size': self.layer_sizes[current_layer + 1],
-                        'activation': 'relu' if current_layer < len(self.layer_sizes) - 2 else 'softmax'
-                    })
+                    layer_config = neural_network_pb2.LayerConfig(
+                        input_size=self.layer_sizes[current_layer],
+                        output_size=self.layer_sizes[current_layer + 1],
+                        activation='relu' if current_layer < len(self.layer_sizes) - 2 else 'softmax'
+                    )
+                    layer_configs.append(layer_config)
                     layer_indices.append(current_layer)
                     current_layer += 1
             
-            # Store layer mapping
             device_layer_map[device_id] = layer_indices
             
-            # Initialize device with its layer configurations
-            socket.send_pyobj({
-                'command': 'init',
-                'layer_configs': layer_configs,
-                'device_id': device_id
-            })
-            response = socket.recv_pyobj()
-            print(f"Initialized device {device_id} with layers {layer_indices}: {response}")
+            request = neural_network_pb2.InitializeRequest(
+                layer_configs=layer_configs,
+                device_id=device_id
+            )
+            response = stub.Initialize(request)
+            print(f"Initialized device {device_id} with layers {layer_indices}: {response.message}")
         
         self.device_layer_map = device_layer_map
         print("\nLayer distribution complete")
@@ -113,13 +108,14 @@ class DistributedNeuralNetwork:
         
         # Forward through each device in order
         for device_id in sorted(self.device_connections.keys()):
-            socket = self.device_connections[device_id]
-            socket.send_pyobj({
-                'command': 'forward',
-                'input': A
-            })
-            response = socket.recv_pyobj()
-            A = response['output']
+            stub = self.device_connections[device_id]
+            request = neural_network_pb2.ForwardRequest(
+                input=A.flatten().tolist(),
+                batch_size=A.shape[0],
+                input_size=A.shape[1]
+            )
+            response = stub.Forward(request)
+            A = np.array(response.output).reshape(response.batch_size, response.output_size)
             activations.append(A)
             
         return activations
@@ -133,23 +129,21 @@ class DistributedNeuralNetwork:
         
         # Backward through each device in reverse order
         for device_id in sorted(self.device_connections.keys(), reverse=True):
-            socket = self.device_connections[device_id]
-            socket.send_pyobj({
-                'command': 'backward',
-                'grad_input': dA
-            })
-            response = socket.recv_pyobj()
-            dA = response['grad_output']
+            stub = self.device_connections[device_id]
+            request = neural_network_pb2.BackwardRequest(
+                grad_input=dA.flatten().tolist(),
+                batch_size=dA.shape[0],
+                input_size=dA.shape[1]
+            )
+            response = stub.Backward(request)
+            dA = np.array(response.grad_output).reshape(response.batch_size, response.output_size)
 
     def update_parameters(self, learning_rate):
         """Update parameters on all devices"""
         for device_id in sorted(self.device_connections.keys()):
-            socket = self.device_connections[device_id]
-            socket.send_pyobj({
-                'command': 'update',
-                'learning_rate': learning_rate
-            })
-            socket.recv_pyobj()
+            stub = self.device_connections[device_id]
+            request = neural_network_pb2.UpdateRequest(learning_rate=learning_rate)
+            stub.Update(request)
 
     def train(self, train_loader, val_loader, epochs=100, learning_rate=0.1):
         print("\nStarting distributed training across devices...")
@@ -247,7 +241,7 @@ def main():
     train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
     val_dataset = datasets.MNIST('data', train=False, transform=transform)
     
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=1200, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1000)
     
     layer_sizes = [784, 128, 64, 10]
