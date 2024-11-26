@@ -27,3 +27,9 @@ tqdm==4.67.0
 typing_extensions==4.12.2
 tzdata==2024.2
 zmq==0.0.0
+flask>=2.0.0
+torch>=1.9.0
+torchvision>=0.10.0
+numpy>=1.19.0
+zmq>=22.0.0
+tqdm>=4.60.0
