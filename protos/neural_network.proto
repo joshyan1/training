@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package neural_network;
+
+// Layer configuration message
+message LayerConfig {
+  int32 input_size = 1;
+  int32 output_size = 2;
+  string activation = 3;
+}
+
+// Initialize request containing layer configurations for a device
+message InitializeRequest {
+  repeated LayerConfig layer_configs = 1;
+  int32 device_id = 2;
+}
+
+// Initialize response
+message InitializeResponse {
+  string status = 1;
+  string message = 2;
+}
+
+// Forward pass request
+message ForwardRequest {
+  repeated float input = 1;
+  int32 batch_size = 2;
+  int32 input_size = 3;
+}
+
+// Forward pass response
+message ForwardResponse {
+  repeated float output = 1;
+  int32 batch_size = 2;
+  int32 output_size = 3;
+}
+
+// Backward pass request
+message BackwardRequest {
+  repeated float grad_input = 1;
+  int32 batch_size = 2;
+  int32 input_size = 3;
+}
+
+// Backward pass response
+message BackwardResponse {
+  repeated float grad_output = 1;
+  int32 batch_size = 2;
+  int32 output_size = 3;
+}
+
+// Parameter update request
+message UpdateRequest {
+  float learning_rate = 1;
+}
+
+// Parameter update response
+message UpdateResponse {
+  string status = 1;
+}
+
+// Neural Network Service definition
+service NeuralNetworkService {
+  // Initialize the device with layer configurations
+  rpc Initialize(InitializeRequest) returns (InitializeResponse) {}
+  
+  // Forward pass through the layers
+  rpc Forward(ForwardRequest) returns (ForwardResponse) {}
+  
+  // Backward pass for gradient computation
+  rpc Backward(BackwardRequest) returns (BackwardResponse) {}
+  
+  // Update parameters using computed gradients
+  rpc Update(UpdateRequest) returns (UpdateResponse) {}
+}
