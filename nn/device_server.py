@@ -166,6 +166,10 @@ class DeviceServer:
                 self.device.update(message['learning_rate'])
                 self.socket.send_pyobj({'status': 'updated'})
 
+            elif command =="ping":
+                self.socket.send_pyobj({'status': 'connection successful'})
+
+
 if __name__ == '__main__':
     import sys
     if len(sys.argv) != 2:
